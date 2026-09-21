@@ -1,0 +1,12 @@
+{
+  "name": "fonnte-finance-bot",
+  "version": "1.0.0",
+  "description": "Bot pencatat pengeluaran via WhatsApp (Fonnte) yang menyimpan data ke Google Sheets",
+  "main": "api/webhook.js",
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "dependencies": {
+    "googleapis": "^131.0.0"
+  }
+}
