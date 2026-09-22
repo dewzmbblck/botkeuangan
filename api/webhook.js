@@ -1,27 +1,23 @@
-const { parseMessage, isCommand, formatRupiah } = require("../lib/parser");
-const { loadAccounts, resolveAccount, updateBalance, computeDashboard, writeDashboard } = require("../lib/accounts");
-const { appendLog } = require("../lib/sheets");
+const { parseMessage, isCommand } = require("../lib/parser");
+const { loadAccounts, resolveAccount, updateBalance, computeDashboard, attributePiutang, writeDashboard } = require("../lib/accounts");
+const { appendLog, loadLog } = require("../lib/sheets");
 const { sendMessage } = require("../lib/fonnte");
-
-const HELP_TEXT =
-  "Format tidak dikenali 🤔\n\n" +
-  "Contoh perintah yang didukung:\n" +
-  "- masuk 1 500000 gaji\n" +
-  "- keluar 2 15000 makan siang\n" +
-  "- hutang 1 4 500000 tidak resmi beli modal\n" +
-  "- bayar 4 1 200000 tidak resmi cicilan 1\n\n" +
-  "Ketik \"saldo\" untuk ringkasan aset, atau \"rekening\" untuk daftar rekening.";
-
-function accountLabel(acc) {
-  return `${acc.id} (${acc.bank} - ${acc.pemilik})`;
-}
-
-function ambiguousReply(candidates) {
-  const list = candidates.map((a) => `- ${accountLabel(a)}`).join("\n");
-  return `Ada lebih dari satu rekening yang cocok, tolong pakai ID-nya:\n${list}`;
-}
+const {
+  helpText,
+  ambiguousReply,
+  notFoundReply,
+  listReply,
+  saldoReply,
+  transactionReply,
+  hutangBayarReply,
+} = require("../lib/messages");
 
 module.exports = async function handler(req, res) {
+  if (req.method === "GET") {
+    res.status(200).json({ status: "ok", message: "Webhook endpoint is alive" });
+    return;
+  }
+
   if (req.method !== "POST") {
     res.status(405).json({ error: "Method not allowed" });
     return;
@@ -38,10 +34,10 @@ module.exports = async function handler(req, res) {
 
     // --- Command: daftar rekening ---
     if (isCommand(message, ["rekening", "daftar rekening", "list rekening"])) {
-      const list = accounts
-        .map((a) => `- ${accountLabel(a)}: ${formatRupiah(a.saldoRiil)}`)
-        .join("\n");
-      await sendMessage(sender, `📒 Daftar Rekening\n${list}`);
+      const sendiriAccounts = accounts.filter((a) => a.kategori.toLowerCase() === "sendiri");
+      const pihakLuarAccounts = accounts.filter((a) => a.kategori.toLowerCase() === "pihakluar");
+
+      await sendMessage(sender, listReply(sendiriAccounts, pihakLuarAccounts));
       res.status(200).json({ status: "ok", type: "list" });
       return;
     }
@@ -49,12 +45,20 @@ module.exports = async function handler(req, res) {
     // --- Command: saldo / rekap ---
     if (isCommand(message, ["saldo", "rekap", "cek saldo"])) {
       const dash = computeDashboard(accounts);
-      await writeDashboard(accounts); // sinkronkan tab Dashboard, jaga-jaga kalau ada edit manual di Master
-      const reply =
-        `📊 Ringkasan Aset\n` +
-        `Total Saldo Rekening Sendiri: ${formatRupiah(dash.totalSendiri)}\n` +
-        `Total Piutang Aktif: ${formatRupiah(dash.totalPiutang)}\n` +
-        `Total Aset Asli: ${formatRupiah(dash.totalAsetAsli)}`;
+      const logRows = await loadLog();
+      const piutangMap = attributePiutang(accounts, logRows);
+      await writeDashboard(accounts, logRows); // sinkronkan tab Dashboard, jaga-jaga kalau ada edit manual di Master
+
+      const sendiriAccounts = accounts.filter((a) => a.kategori.toLowerCase() === "sendiri");
+      const pihakLuarAccounts = accounts.filter((a) => a.kategori.toLowerCase() === "pihakluar");
+
+      const reply = saldoReply({
+        sendiriAccounts,
+        piutangMap,
+        pihakLuarAccounts,
+        totalAsetAsli: dash.totalAsetAsli,
+      });
+
       await sendMessage(sender, reply);
       res.status(200).json({ status: "ok", type: "dashboard" });
       return;
@@ -63,7 +67,7 @@ module.exports = async function handler(req, res) {
     // --- Transaksi ---
     const parsed = parseMessage(message);
     if (!parsed) {
-      await sendMessage(sender, HELP_TEXT);
+      await sendMessage(sender, helpText());
       res.status(200).json({ status: "ignored", reason: "unparsed message" });
       return;
     }
@@ -71,7 +75,7 @@ module.exports = async function handler(req, res) {
     if (parsed.kind === "masuk" || parsed.kind === "keluar") {
       const result = resolveAccount(parsed.rekening, accounts);
       if (result.notFound) {
-        await sendMessage(sender, `Rekening "${parsed.rekening}" tidak ditemukan. Ketik "rekening" untuk lihat daftar.`);
+        await sendMessage(sender, notFoundReply(parsed.rekening));
         res.status(200).json({ status: "ignored", reason: "account not found" });
         return;
       }
@@ -87,7 +91,6 @@ module.exports = async function handler(req, res) {
       await updateBalance(acc.row, newSaldo);
 
       const updatedAccounts = accounts.map((a) => (a.row === acc.row ? { ...a, saldoRiil: newSaldo } : a));
-      await writeDashboard(updatedAccounts);
 
       await appendLog({
         jenis: parsed.kind === "masuk" ? "Uang Masuk" : "Uang Keluar",
@@ -98,10 +101,12 @@ module.exports = async function handler(req, res) {
         sender,
       });
 
-      const symbol = parsed.kind === "masuk" ? "+" : "-";
+      const freshLog = await loadLog();
+      await writeDashboard(updatedAccounts, freshLog);
+
       await sendMessage(
         sender,
-        `✅ ${accountLabel(acc)}\n${symbol}${formatRupiah(parsed.amount)} (${parsed.note})\nSaldo sekarang: ${formatRupiah(newSaldo)}`
+        transactionReply({ kind: parsed.kind, acc, amount: parsed.amount, note: parsed.note, newSaldo })
       );
       res.status(200).json({ status: "ok", type: parsed.kind });
       return;
@@ -112,7 +117,7 @@ module.exports = async function handler(req, res) {
       const tujuanResult = resolveAccount(parsed.tujuan, accounts);
 
       if (asalResult.notFound || tujuanResult.notFound) {
-        await sendMessage(sender, `Salah satu rekening tidak ditemukan. Ketik "rekening" untuk lihat daftar.`);
+        await sendMessage(sender, notFoundReply(asalResult.notFound ? parsed.asal : parsed.tujuan));
         res.status(200).json({ status: "ignored", reason: "account not found" });
         return;
       }
@@ -152,22 +157,27 @@ module.exports = async function handler(req, res) {
         return a;
       });
       const dash = computeDashboard(updatedAccounts);
-      await writeDashboard(updatedAccounts);
+      const freshLog = await loadLog();
+      await writeDashboard(updatedAccounts, freshLog);
 
-      const verb = parsed.kind === "hutang" ? "Beri Hutang" : "Bayar Hutang";
-      const reply =
-        `✅ ${verb} (${parsed.status})\n` +
-        `${accountLabel(asal)} → ${accountLabel(tujuan)}\n` +
-        `Nominal: ${formatRupiah(parsed.amount)} (${parsed.note})\n` +
-        `Total Aset Asli tetap: ${formatRupiah(dash.totalAsetAsli)}`;
-
-      await sendMessage(sender, reply);
+      await sendMessage(
+        sender,
+        hutangBayarReply({
+          kind: parsed.kind,
+          asal,
+          tujuan,
+          amount: parsed.amount,
+          status: parsed.status,
+          note: parsed.note,
+          totalAsetAsli: dash.totalAsetAsli,
+        })
+      );
       res.status(200).json({ status: "ok", type: parsed.kind });
       return;
     }
 
     // Fallback, seharusnya tidak pernah sampai sini
-    await sendMessage(sender, HELP_TEXT);
+    await sendMessage(sender, helpText());
     res.status(200).json({ status: "ignored", reason: "unhandled kind" });
   } catch (err) {
     console.error("Webhook error:", err);

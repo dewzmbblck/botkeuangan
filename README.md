@@ -91,7 +91,7 @@ Ambil **Sheet ID** dari URL: `https://docs.google.com/spreadsheets/d/INI_SHEET_I
    - `GOOGLE_SERVICE_ACCOUNT_EMAIL`
    - `GOOGLE_PRIVATE_KEY`
 4. Redeploy supaya env variable terbaca.
-5. Endpoint webhook aktif di: `https://nama-project-kamu.vercel.app/api/webhook`
+5. Endpoint webhook aktif di: `https://botkeuangan-three.vercel.app/api/webhook`
 
 ## 5. Sambungkan webhook ke Fonnte
 
